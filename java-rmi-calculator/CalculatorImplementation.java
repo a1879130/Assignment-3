@@ -1,231 +1,160 @@
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.Stack;
-import java.util.List;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.math.BigInteger;
 
 /**
- * CalculatorImplementation provides the concrete implementation of the Calculator interface
- * 
- * This class extends UnicastRemoteObject to enable RMI functionality
+ * Implementation of the Calculator remote interface.
+ * Uses a single shared stack on the server for all clients (default requirement).
+ *
+ * Thread-safety:
+ *   All stack operations synchronize on the internal stack object.
  */
 public class CalculatorImplementation extends UnicastRemoteObject implements Calculator {
-    
+
     private static final long serialVersionUID = 1L;
-    
-    // Shared stack for all clients
-    
-    private Stack<Integer> stack;
-    
+
+    // Server-side stack that stores integer values.
+    private final Deque<Integer> stack = new ArrayDeque<>();
+
     /**
-     * Constructor initializes the calculator implementation
-     * 
-     * @throws RemoteException if the remote object cannot be created
-     *                        
+     * Constructor required for UnicastRemoteObject subclasses.
+     * @throws RemoteException if RMI setup fails
      */
-    public CalculatorImplementation() throws RemoteException {
+    protected CalculatorImplementation() throws RemoteException {
         super();
-        this.stack = new Stack<>();
-        System.out.println("Calculator implementation initialized.");
     }
-    
+
     /**
-     * Push a value onto the stack (thread-safe implementation)
-     * 
-     * @param val the integer value to push onto the stack
-     *          
-     * @throws RemoteException if a network error occurs during the remote call
+     * Push an integer value onto the server-side stack.
+     * @param val integer value to push
+     * @throws RemoteException on RMI error
      */
     @Override
-    public synchronized void pushValue(int val) throws RemoteException {
-        stack.push(val);
-        System.out.println("Pushed value: " + val + " | Stack size: " + stack.size());
+    public void pushValue(int val) throws RemoteException {
+        synchronized (stack) {
+            stack.push(val);
+            stack.notifyAll();
+        }
     }
-    
+
     /**
-     * Push an operation onto the stack and execute it on all values
-     * 
-     * @param operator the operation to perform: "min", "max", "lcm", or "gcd"
-     *  
-     * @throws RemoteException if a network error occurs during the remote call
-     *                    
+     * Push an operation token which causes the server to pop all values and
+     * compute the specified operation ("min", "max", "lcm", "gcd").
+     * The server will push the computed integer result back on the stack.
+     * Special cases: if stack is empty, no-op (but per assignment we assume sensible usage).
+     *
+     * @param operator operation token
+     * @throws RemoteException on RMI error
      */
     @Override
-    public synchronized void pushOperation(String operator) throws RemoteException {
-        if (stack.isEmpty()) {
-            System.out.println("Warning: Operation " + operator + " called on empty stack. " 
+    public void pushOperation(String operator) throws RemoteException {
+        List<Integer> values = new ArrayList<>();
+        synchronized (stack) {
+            while (!stack.isEmpty()) {
+                values.add(stack.pop());
+            }
+        }
+
+        if (values.isEmpty()) {
+            // nothing to operate on; according to assignment this shouldn't occur
             return;
         }
-        
-        // Pop all values from the stack
-    
-        List<Integer> values = new ArrayList<>();
-        while (!stack.isEmpty()) {
-            values.add(stack.pop());
-        }
-        
+
         int result;
         switch (operator.toLowerCase()) {
             case "min":
-                result = findMin(values);
+                result = values.get(0);
+                for (int v : values) result = Math.min(result, v);
                 break;
             case "max":
-                result = findMax(values);
-                break;
-            case "lcm":
-                result = findLCM(values);
+                result = values.get(0);
+                for (int v : values) result = Math.max(result, v);
                 break;
             case "gcd":
-                result = findGCD(values);
+                result = values.get(0);
+                for (int v : values) result = gcd(result, v);
+                break;
+            case "lcm":
+                result = values.get(0);
+                for (int v : values) result = lcm(result, v);
                 break;
             default:
-                throw new RemoteException("Invalid operator: " + operator + 
-                                        " 无效操作符: " + operator);
+                // Unknown operator: ignore (assignment promises only valid operators)
+                return;
         }
-        
-        // Push the result back onto the stack
-        stack.push(result);
-        System.out.println("Operation " + operator + " executed. Result: " + result);
+
+        synchronized (stack) {
+            stack.push(result);
+            stack.notifyAll();
+        }
     }
-    
+
     /**
-     * Pop and return the top value from the stack
-     * 
-     * @return the top value from the stack
-     * @throws RemoteException if the stack is empty or a network error occurs
+     * Pop the top integer from the server stack and return it.
+     * Assumes caller will not pop when empty (assignment guarantee), but we handle empty by throwing RemoteException.
+     * @return popped integer value
+     * @throws RemoteException on RMI error or empty stack
      */
     @Override
-    public synchronized int pop() throws RemoteException {
-        if (stack.isEmpty()) {
-            throw new RemoteException("Stack is empty, cannot pop. 堆栈为空，无法弹出。");
+    public int pop() throws RemoteException {
+        synchronized (stack) {
+            if (stack.isEmpty()) {
+                throw new RemoteException("Pop attempted on empty stack");
+            }
+            return stack.pop();
         }
-        int value = stack.pop();
-        System.out.println("Popped value: " + value + " | Remaining stack size: " + stack.size() +
-                          " 弹出值: " + value + " | 剩余堆栈大小: " + stack.size());
-        return value;
     }
-    
+
     /**
-     * Check if the stack is empty
-     * 
-     * @return true if the stack is empty, false otherwise
-     *         
-     * @throws RemoteException if a network error occurs during the remote call
-     *                       
+     * Return true if the server stack is empty.
+     * @return true if empty
+     * @throws RemoteException on RMI error
      */
     @Override
-    public synchronized boolean isEmpty() throws RemoteException {
-        boolean empty = stack.isEmpty();
-        System.out.println("Stack empty check: " + empty + " 堆栈空检查: " + empty);
-        return empty;
+    public boolean isEmpty() throws RemoteException {
+        synchronized (stack) {
+            return stack.isEmpty();
+        }
     }
-    
+
     /**
-     * Wait for specified milliseconds then pop the top value from the stack
-     * @param millis the number of milliseconds to wait before popping
-     * @return the top value from the stack after the delay
-     * @throws RemoteExcept
+     * Wait millis milliseconds, then pop the top integer and return it.
+     * The waiting occurs before acquiring the stack lock so other clients can operate while waiting.
+     * @param millis sleep time in milliseconds before popping
+     * @return popped integer value
+     * @throws RemoteException on RMI error or empty stack at time of pop
      */
     @Override
-    public synchronized int delayPop(int millis) throws RemoteException {
-        System.out.println("DelayPop called with delay: " + millis + "ms. ");
-        
-        if (stack.isEmpty()) {
-            throw new RemoteException("Stack is empty, cannot delay pop.");
-        }
-        
+    public int delayPop(int millis) throws RemoteException {
         try {
-            Thread.sleep(millis);
+            Thread.sleep(Math.max(0, millis));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RemoteException("DelayPop interrupted.", e);
+            throw new RemoteException("delayPop interrupted", e);
         }
-        
-        int value = stack.pop();
-        System.out.println("DelayPop completed. Popped value: " + value);
-        return value;
+        // perform pop (this will validate non-empty)
+        return pop();
     }
-    
-    /**
-     * Find the minimum value in the list
-     * 
-     * @param values list of integers to find minimum from
-     * @return the minimum value
-     */
-    private int findMin(List<Integer> values) {
-        return values.stream().mapToInt(Integer::intValue).min().orElse(0);
-    }
-    
-    /**
-     * Find the maximum value in the list
-     * 
-     * @param values list of integers to find maximum from
-     * @return the maximum value
-     */
-    private int findMax(List<Integer> values) {
-        return values.stream().mapToInt(Integer::intValue).max().orElse(0);
-    }
-    
-    /**
-     * Find the least common multiple of all values in the list
-     * 查找列表中所有值的最小公倍数
-     * 
-     * @param values list of integers to find LCM from
-     *              要查找最小公倍数的整数列表
-     * @return the least common multiple
-     *         最小公倍数
-     */
-    private int findLCM(List<Integer> values) {
-        if (values.isEmpty()) return 0;
-        
-        int lcm = Math.abs(values.get(0));
-        for (int i = 1; i < values.size(); i++) {
-            lcm = lcm(lcm, Math.abs(values.get(i)));
-        }
-        return lcm;
-    }
-    
-    /**
-     * Find the greatest common divisor of all values in the list
-     * 
-     * @param values list of integers to find GCD from
-     *             
-     * @return the greatest common divisor
-     */
-    private int findGCD(List<Integer> values) {
-        if (values.isEmpty()) return 0;
-        
-        int gcd = Math.abs(values.get(0));
-        for (int i = 1; i < values.size(); i++) {
-            gcd = gcd(gcd, Math.abs(values.get(i)));
-        }
-        return gcd;
-    }
-    
-    /**
-     * Calculate LCM of two numbers
-     * 
-     * @param a first number 
-     * @param b second number 
-     * @return LCM of a and b
-     */
-    private int lcm(int a, int b) {
-        return (a * b) / gcd(a, b);
-    }
-    
-    /**
-     * Calculate GCD of two numbers using Euclidean algorithm
-     * 
-     * @param a first number 
-     * @param b second number 
-     * @return GCD of a and b
-     */
+
+    // Helper: gcd using BigInteger (handles negative values).
     private int gcd(int a, int b) {
-        while (b != 0) {
-            int temp = b;
-            b = a % b;
-            a = temp;
-        }
-        return a;
+        BigInteger A = BigInteger.valueOf(Math.abs((long)a));
+        BigInteger B = BigInteger.valueOf(Math.abs((long)b));
+        BigInteger g = A.gcd(B);
+        return g.intValue();
+    }
+
+    // Helper: lcm using BigInteger to avoid overflow where possible.
+    private int lcm(int a, int b) {
+        if (a == 0 || b == 0) return 0;
+        BigInteger A = BigInteger.valueOf(Math.abs((long)a));
+        BigInteger B = BigInteger.valueOf(Math.abs((long)b));
+        BigInteger g = A.gcd(B);
+        BigInteger l = A.divide(g).multiply(B);
+        return l.intValue();
     }
 }
